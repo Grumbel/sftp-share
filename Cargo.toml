@@ -1,0 +1,30 @@
+[package]
+name = "sftp-share"
+version = "0.1.0"
+edition = "2021"
+description = "A tiny, standalone SFTP server for sharing arbitrary files and directories with virtual users"
+license = "MIT"
+
+[[bin]]
+name = "sftp-share"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+russh = "0.44"
+russh-keys = "0.44"
+russh-sftp = "2.0"
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"
+anyhow = "1"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+humantime = "2"
+local-ip-address = "0.6"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
