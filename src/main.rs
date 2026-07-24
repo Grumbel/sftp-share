@@ -792,9 +792,33 @@ async fn main() -> anyhow::Result<()> {
         listen_ip.to_string()
     };
 
+    let host_key_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null";
+
     println!("Serving:\n");
     println!("  sftp://{}@{}:{}/", cli.user, display_ip, cli.port);
     println!("\n  Password: {}\n", password);
+    println!("Connect with (you'll be prompted for the password above):\n");
+    println!(
+        "  sftp -P {port} {opts} {user}@{host}",
+        port = cli.port,
+        opts = host_key_opts,
+        user = cli.user,
+        host = display_ip,
+    );
+    println!(
+        "  sshfs {user}@{host}:/ ./mount -p {port} -o {opts}\n",
+        user = cli.user,
+        host = display_ip,
+        port = cli.port,
+        opts = "StrictHostKeyChecking=no,UserKnownHostsFile=/dev/null",
+    );
+    println!(
+        "  (the host key is generated fresh in memory every time sftp-share\n\
+         \x20  starts, so it's different on every run — the options above skip\n\
+         \x20  host-key verification and known_hosts bookkeeping entirely, which\n\
+         \x20  is fine for a throwaway share like this but would be a bad habit\n\
+         \x20  for a server you expect to trust long-term)\n"
+    );
     println!("Press Ctrl-C to stop.\n");
 
     let shutdown = Arc::new(tokio::sync::Notify::new());
