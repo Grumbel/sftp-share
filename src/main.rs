@@ -243,7 +243,6 @@ impl SftpSession {
     }
 }
 
-#[async_trait::async_trait]
 impl russh_sftp::server::Handler for SftpSession {
     type Error = StatusCode;
 
@@ -627,7 +626,7 @@ impl SshHandler for SshSession {
         _modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        session.channel_failure(channel)?;
+        session.channel_failure(channel);
         Ok(())
     }
 
@@ -636,7 +635,7 @@ impl SshHandler for SshSession {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        session.channel_failure(channel)?;
+        session.channel_failure(channel);
         Ok(())
     }
 
@@ -646,7 +645,7 @@ impl SshHandler for SshSession {
         _data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        session.channel_failure(channel)?;
+        session.channel_failure(channel);
         Ok(())
     }
 
@@ -657,14 +656,14 @@ impl SshHandler for SshSession {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         if name != "sftp" {
-            session.channel_failure(channel_id)?;
+            session.channel_failure(channel_id);
             return Ok(());
         }
         let Some(channel) = self.channels.remove(&channel_id) else {
-            session.channel_failure(channel_id)?;
+            session.channel_failure(channel_id);
             return Ok(());
         };
-        session.channel_success(channel_id)?;
+        session.channel_success(channel_id);
 
         let state = self.state.clone();
         let one_shot = self.one_shot;
@@ -784,7 +783,7 @@ async fn main() -> anyhow::Result<()> {
 
     let shutdown = Arc::new(tokio::sync::Notify::new());
 
-    let server = Server {
+    let mut server = Server {
         state: state.clone(),
         one_shot: cli.one_shot,
         shutdown: shutdown.clone(),
@@ -794,7 +793,7 @@ async fn main() -> anyhow::Result<()> {
     let timeout_spec = cli.timeout.clone();
 
     tokio::select! {
-        res = russh::server::run(config, addr, server) => {
+        res = server.run_on_address(config, addr) => {
             res?;
         }
         _ = shutdown.notified(), if one_shot => {
