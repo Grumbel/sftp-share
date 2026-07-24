@@ -4,9 +4,13 @@ A tiny, standalone SFTP server for sharing arbitrary files and directories
 with virtual users. No root, no system users, no config file.
 
 ```bash
-sftp-share                          # share the current directory
+sftp-share .                         # share the current directory
 sftp-share report.pdf photos/ README.md
 ```
+
+Nothing is shared unless you explicitly say so — running `sftp-share` with
+no arguments prints an error rather than silently sharing the current
+directory.
 
 ## Options
 
@@ -62,9 +66,12 @@ generate it once with `cargo generate-lockfile` (or just `cargo build`).
 - Shell/exec/PTY requests are refused — this server does nothing but SFTP.
 - The virtual filesystem is intentionally simple: when you pass explicit
   paths, each one appears as a single named entry directly under `/`
-  (named after its basename); with no arguments, `/` *is* the current
-  directory. Path resolution canonicalizes and checks prefixes to prevent
-  escaping the shared paths via `..` or symlink shenanigans.
+  (named after its basename); `sftp-share .` is a special case that shares
+  the current directory's contents flattened directly at `/`, with no
+  enclosing folder. Nothing is ever shared automatically — at least one
+  path argument is required. Path resolution canonicalizes and checks
+  prefixes to prevent escaping the shared paths via `..` or symlink
+  shenanigans.
 - Read-only by default; `--write` enables `open`-for-write, `mkdir`,
   `rmdir`, `remove`, and `rename`. Symlink creation/reading is never
   supported.

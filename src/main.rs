@@ -28,7 +28,8 @@ use russh_sftp::protocol::{
     about = "A tiny, standalone SFTP server for sharing arbitrary files and directories with virtual users"
 )]
 struct Cli {
-    /// Files and/or directories to share. Defaults to the current directory.
+    /// Files and/or directories to share. Nothing is shared unless you pass
+    /// at least one path; use "." to share the current directory.
     paths: Vec<PathBuf>,
 
     /// Username required to log in.
@@ -70,7 +71,9 @@ struct Cli {
 
 /// How the virtual root `/` maps onto the real filesystem.
 enum Root {
-    /// `sftp-share` with no arguments: `/` *is* this real directory.
+    /// `sftp-share .`: `/` *is* this real directory (flattened, no
+    /// enclosing folder name). Never chosen automatically — the user must
+    /// pass "." explicitly.
     Single(PathBuf),
     /// `sftp-share a b c`: `/` contains one named entry per shared path.
     Multi(Vec<(String, PathBuf)>),
@@ -730,7 +733,19 @@ async fn main() -> anyhow::Result<()> {
 
     let password = cli.password.clone().unwrap_or_else(generate_password);
 
-    let root = if cli.paths.is_empty() {
+    if cli.paths.is_empty() {
+        anyhow::bail!(
+            "no paths given — nothing will be shared automatically.\n\
+             Pass one or more files/directories, or use \".\" to share the current directory:\n\
+             \n  sftp-share .\n  sftp-share report.pdf photos/ README.md\n"
+        );
+    }
+
+    // A single literal "." means "share the current directory's contents
+    // directly at the virtual root" (flattened), matching `python -m
+    // http.server`-style behavior. Anything else — including "." combined
+    // with other paths — is treated as a named top-level entry per path.
+    let root = if cli.paths.len() == 1 && cli.paths[0] == PathBuf::from(".") {
         Root::Single(std::env::current_dir()?)
     } else {
         let mut entries = Vec::new();
