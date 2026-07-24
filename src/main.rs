@@ -13,7 +13,8 @@ use rand::Rng;
 use russh::server::{Auth, Handler as SshHandler, Msg, Server as SshServerTrait, Session};
 use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{
-    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Packet, Status, StatusCode,
+    Version,
 };
 
 // ---------------------------------------------------------------------
@@ -560,7 +561,7 @@ impl russh_sftp::server::Handler for SftpSession {
         _id: u32,
         _request: String,
         _data: Vec<u8>,
-    ) -> Result<Status, Self::Error> {
+    ) -> Result<Packet, Self::Error> {
         Err(StatusCode::OpUnsupported)
     }
 }
