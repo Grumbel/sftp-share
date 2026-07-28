@@ -856,9 +856,17 @@ async fn main() -> anyhow::Result<()> {
     println!("Serving:\n");
     println!("  sftp://{}@{}:{}/", cli.user, display_ip, cli.port);
     println!("\n  Password: {}\n", password);
-    println!("Connect with (you'll be prompted for the password above):\n");
+    println!("Connect with:\n");
     println!(
-        "  sftp -P {port} {opts} {user}@{host}",
+        "  sftp -P {port} {opts} {user}@{host}\n",
+        port = cli.port,
+        opts = host_key_opts,
+        user = cli.user,
+        host = display_ip,
+    );
+    println!(
+        "  sshpass -p '{pass}' sftp -P {port} {opts} {user}@{host}\n",
+        pass = password,
         port = cli.port,
         opts = host_key_opts,
         user = cli.user,
