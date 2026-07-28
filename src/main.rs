@@ -96,6 +96,10 @@ impl AppState {
     /// Resolve a client-supplied absolute virtual path (e.g. "/photos/a.jpg")
     /// into a real path, refusing anything that would escape the shared
     /// directories.
+    ///
+    /// Returns a **canonical** path when the target exists. For not-yet-existing
+    /// targets (CREATE), canonicalizes the parent and joins the final component
+    /// so `--write` can create new files without failing the sandbox check.
     fn resolve(&self, virt_path: &str) -> Result<Resolved, StatusCode> {
         let comps: Vec<&str> = virt_path
             .split('/')
@@ -112,18 +116,15 @@ impl AppState {
         match &self.root {
             Root::Single(base) => {
                 if comps.is_empty() {
-                    return Ok(Resolved::Path(base.clone()));
+                    let canon = base.canonicalize().map_err(|_| StatusCode::NoSuchFile)?;
+                    return Ok(Resolved::Path(canon));
                 }
                 let mut p = base.clone();
                 for c in &comps {
                     p.push(c);
                 }
                 let canon_base = base.canonicalize().map_err(|_| StatusCode::NoSuchFile)?;
-                let canon = p.canonicalize().map_err(|_| StatusCode::NoSuchFile)?;
-                if !canon.starts_with(&canon_base) {
-                    return Err(StatusCode::PermissionDenied);
-                }
-                Ok(Resolved::Path(p))
+                Self::sandbox_path(p, &canon_base)
             }
             Root::Multi(entries) => {
                 if comps.is_empty() {
@@ -134,7 +135,8 @@ impl AppState {
                     return Err(StatusCode::NoSuchFile);
                 };
                 if comps.len() == 1 {
-                    return Ok(Resolved::Path(target.clone()));
+                    let canon = target.canonicalize().map_err(|_| StatusCode::NoSuchFile)?;
+                    return Ok(Resolved::Path(canon));
                 }
                 let meta = std::fs::symlink_metadata(target).map_err(|_| StatusCode::NoSuchFile)?;
                 if !meta.is_dir() {
@@ -145,11 +147,30 @@ impl AppState {
                     p.push(c);
                 }
                 let canon_base = target.canonicalize().map_err(|_| StatusCode::NoSuchFile)?;
-                let canon = p.canonicalize().map_err(|_| StatusCode::NoSuchFile)?;
-                if !canon.starts_with(&canon_base) {
+                Self::sandbox_path(p, &canon_base)
+            }
+        }
+    }
+
+    /// Ensure `path` stays under `canon_base`. If `path` exists, return its
+    /// canonical form; if not, canonicalize the parent and re-join the final
+    /// component (needed for CREATE of new files).
+    fn sandbox_path(path: PathBuf, canon_base: &std::path::Path) -> Result<Resolved, StatusCode> {
+        match path.canonicalize() {
+            Ok(canon) => {
+                if !canon.starts_with(canon_base) {
                     return Err(StatusCode::PermissionDenied);
                 }
-                Ok(Resolved::Path(p))
+                Ok(Resolved::Path(canon))
+            }
+            Err(_) => {
+                let parent = path.parent().ok_or(StatusCode::NoSuchFile)?;
+                let name = path.file_name().ok_or(StatusCode::NoSuchFile)?;
+                let canon_parent = parent.canonicalize().map_err(|_| StatusCode::NoSuchFile)?;
+                if !canon_parent.starts_with(canon_base) {
+                    return Err(StatusCode::PermissionDenied);
+                }
+                Ok(Resolved::Path(canon_parent.join(name)))
             }
         }
     }
@@ -331,6 +352,9 @@ impl russh_sftp::server::Handler for SftpSession {
         len: u32,
     ) -> Result<Data, Self::Error> {
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        // Cap to avoid a malicious client requesting multi-GB buffers.
+        const MAX_READ: u32 = 1024 * 1024;
+        let len = len.min(MAX_READ);
         let Some(OpenHandle::File(file)) = self.handles.get_mut(&handle) else {
             return Err(StatusCode::Failure);
         };
@@ -368,7 +392,20 @@ impl russh_sftp::server::Handler for SftpSession {
     }
 
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
-        self.stat(id, path).await
+        self.log_access("lstat", &path);
+        match self.state.resolve(&path)? {
+            Resolved::VirtualRoot => Ok(Attrs {
+                id,
+                attrs: synthetic_dir_attrs(),
+            }),
+            Resolved::Path(p) => {
+                let meta = std::fs::symlink_metadata(&p).map_err(|_| StatusCode::NoSuchFile)?;
+                Ok(Attrs {
+                    id,
+                    attrs: attrs_from_metadata(&meta),
+                })
+            }
+        }
     }
 
     async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
@@ -597,6 +634,9 @@ struct SshSession {
     shutdown: Arc<tokio::sync::Notify>,
     peer: Option<SocketAddr>,
     verbose: bool,
+    /// True once the client successfully started the SFTP subsystem.
+    /// Used so `--one-shot` does not fire on unrelated channel closes.
+    sftp_started: bool,
 }
 
 #[async_trait::async_trait]
@@ -624,7 +664,11 @@ impl SshHandler for SshSession {
             .peer
             .map(|a| a.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        if user == self.state.user && password == self.state.password {
+        // Constant-time-ish compare so password length/content timing is less
+        // of a side channel. Still not a hardened login service.
+        let user_ok = const_eq(user.as_bytes(), self.state.user.as_bytes());
+        let pass_ok = const_eq(password.as_bytes(), self.state.password.as_bytes());
+        if user_ok && pass_ok {
             println!("client connected from {peer} as user `{user}`");
             tracing::info!("client connected from {peer} as user `{user}`");
             Ok(Auth::Accept)
@@ -669,7 +713,7 @@ impl SshHandler for SshSession {
             .unwrap_or_else(|| "unknown".to_string());
         println!("client disconnected from {peer}");
         tracing::info!("client disconnected from {peer}");
-        if self.one_shot {
+        if self.one_shot && self.sftp_started {
             self.shutdown.notify_waiters();
         }
         Ok(())
@@ -724,6 +768,7 @@ impl SshHandler for SshSession {
             return Ok(());
         };
         session.channel_success(channel_id);
+        self.sftp_started = true;
 
         // russh_sftp::server::run spawns its own task and returns immediately.
         // Channel teardown is driven by channel_eof / channel_close above.
@@ -758,6 +803,7 @@ impl SshServerTrait for Server {
             shutdown: self.shutdown.clone(),
             peer: addr,
             verbose: self.verbose,
+            sftp_started: false,
         }
     }
 }
@@ -775,6 +821,18 @@ fn generate_password() -> String {
             .collect()
     };
     format!("{}-{}-{}", group(4), group(3), group(4))
+}
+
+/// Best-effort constant-time equality for short byte strings (usernames / passwords).
+fn const_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[tokio::main]
@@ -808,6 +866,7 @@ async fn main() -> anyhow::Result<()> {
         Root::Single(std::env::current_dir()?)
     } else {
         let mut entries = Vec::new();
+        let mut seen_names = std::collections::HashSet::new();
         for p in &cli.paths {
             let canon = p
                 .canonicalize()
@@ -816,6 +875,12 @@ async fn main() -> anyhow::Result<()> {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "root".to_string());
+            if !seen_names.insert(name.clone()) {
+                eprintln!(
+                    "warning: multiple shared paths map to the same name `{name}` \
+                     — only the first is reachable under /{name}"
+                );
+            }
             entries.push((name, canon));
         }
         Root::Multi(entries)
