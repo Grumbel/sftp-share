@@ -605,7 +605,7 @@ impl SshHandler for SshSession {
 
     async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
         Ok(Auth::Reject {
-            proceed_with_methods: None,
+            proceed_with_methods: Some(russh::MethodSet::PASSWORD),
         })
     }
 
@@ -615,7 +615,7 @@ impl SshHandler for SshSession {
         _key: &russh_keys::key::PublicKey,
     ) -> Result<Auth, Self::Error> {
         Ok(Auth::Reject {
-            proceed_with_methods: None,
+            proceed_with_methods: Some(russh::MethodSet::PASSWORD),
         })
     }
 
@@ -632,7 +632,7 @@ impl SshHandler for SshSession {
             println!("auth failed from {peer} (user `{user}`)");
             tracing::warn!("auth failed from {peer} (user `{user}`)");
             Ok(Auth::Reject {
-                proceed_with_methods: None,
+                proceed_with_methods: Some(russh::MethodSet::PASSWORD),
             })
         }
     }
@@ -832,7 +832,13 @@ async fn main() -> anyhow::Result<()> {
         russh_keys::key::KeyPair::generate_ed25519().expect("failed to generate host key");
 
     let config = Arc::new(russh::server::Config {
+        // Only password auth is supported — don't advertise publickey etc.
+        methods: russh::MethodSet::PASSWORD,
+        // Constant-time delay for failed password attempts (anti-timing).
         auth_rejection_time: Duration::from_secs(1),
+        // OpenSSH always probes with "none" first; reject that instantly so the
+        // password prompt appears without a multi-second wait.
+        auth_rejection_time_initial: Some(Duration::ZERO),
         keys: vec![key_pair],
         ..Default::default()
     });
