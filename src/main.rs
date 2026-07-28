@@ -646,6 +646,35 @@ impl SshHandler for SshSession {
         Ok(true)
     }
 
+    /// Client finished sending on this channel (e.g. `sftp` `exit`).
+    /// We must close our side or the client hangs waiting for channel close.
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // russh 0.44: close() is infallible (void). Newer versions return Result.
+        session.close(channel);
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        _channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let peer = self
+            .peer
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        println!("client disconnected from {peer}");
+        tracing::info!("client disconnected from {peer}");
+        if self.one_shot {
+            self.shutdown.notify_waiters();
+        }
+        Ok(())
+    }
+
     async fn pty_request(
         &mut self,
         channel: ChannelId,
@@ -696,23 +725,12 @@ impl SshHandler for SshSession {
         };
         session.channel_success(channel_id);
 
+        // russh_sftp::server::run spawns its own task and returns immediately.
+        // Channel teardown is driven by channel_eof / channel_close above.
         let state = self.state.clone();
-        let one_shot = self.one_shot;
-        let shutdown = self.shutdown.clone();
-        let peer = self
-            .peer
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
         let verbose = self.verbose;
-        tokio::spawn(async move {
-            let sftp = SftpSession::new(state, verbose);
-            russh_sftp::server::run(channel.into_stream(), sftp).await;
-            println!("client disconnected from {peer}");
-            tracing::info!("client disconnected from {peer}");
-            if one_shot {
-                shutdown.notify_waiters();
-            }
-        });
+        let sftp = SftpSession::new(state, verbose);
+        russh_sftp::server::run(channel.into_stream(), sftp).await;
 
         Ok(())
     }
