@@ -76,23 +76,12 @@ generate it once with `cargo generate-lockfile` (or just `cargo build`).
   `rmdir`, `remove`, and `rename`. Symlink creation/reading is never
   supported.
 
-## A note on this build
+## A note on dependencies
 
-This code was written to match the documented shape of `russh` 0.44.x /
-`russh-sftp` 2.x, but it was **not compiled against live crates** in the
-environment that produced it (no network access at generation time). Expect
-to run `cargo build` once and fix a few likely small API mismatches, most
-plausibly around:
+Pinned to `russh` 0.44.x and `russh-sftp` 2.x via `Cargo.lock`. A recent
+stable Rust/Cargo (1.78+) is recommended; older toolchains may reject the
+lockfile format or transitive crates that use newer editions.
 
-- `OpenFlags` variant names (`CREATE`/`CREAT`, `TRUNCATE`/`TRUNC`,
-  `EXCLUDE`/`EXCL`) — check `russh_sftp::protocol::OpenFlags`.
-- The exact field names on `Status`, `FileAttributes`, `Handle`, `Name`,
-  `Data`, `Attrs`, `Version` in `russh_sftp::protocol`.
-- `Channel::into_stream()` — added to `russh` specifically to bridge SSH
-  channels into `AsyncRead + AsyncWrite` for subsystems like SFTP; confirm
-  it exists in whatever `russh` version Cargo resolves.
-- `russh::server::Config` field names (`keys`, `auth_rejection_time`, etc.)
-  and the exact signature of `russh::server::run`.
-
-None of these are structural problems — they're the kind of thing the
-compiler will point at directly, one error at a time.
+If `cargo build` reports missing `OpenFlags` variants or protocol struct
+fields after a dependency bump, check the resolved crate docs — those names
+have shifted between minor releases (`CREATE` vs `CREAT`, etc.).

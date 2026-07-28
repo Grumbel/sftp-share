@@ -235,6 +235,18 @@ fn ok_status(id: u32) -> Status {
     }
 }
 
+/// Map std I/O errors to SFTP status codes instead of always using NoSuchFile.
+fn io_to_status(err: std::io::Error) -> StatusCode {
+    use std::io::ErrorKind;
+    match err.kind() {
+        ErrorKind::NotFound => StatusCode::NoSuchFile,
+        ErrorKind::PermissionDenied => StatusCode::PermissionDenied,
+        ErrorKind::AlreadyExists => StatusCode::Failure,
+        ErrorKind::InvalidInput | ErrorKind::InvalidData => StatusCode::BadMessage,
+        _ => StatusCode::Failure,
+    }
+}
+
 // ---------------------------------------------------------------------
 // SFTP protocol handler (one per SSH channel / client)
 // ---------------------------------------------------------------------
@@ -333,7 +345,7 @@ impl russh_sftp::server::Handler for SftpSession {
             opts.create_new(true);
         }
 
-        let file = opts.open(&path).await.map_err(|_| StatusCode::NoSuchFile)?;
+        let file = opts.open(&path).await.map_err(io_to_status)?;
         let handle = self.alloc_handle();
         self.handles.insert(handle.clone(), OpenHandle::File(file));
         Ok(Handle { id, handle })
@@ -360,9 +372,9 @@ impl russh_sftp::server::Handler for SftpSession {
         };
         file.seek(std::io::SeekFrom::Start(offset))
             .await
-            .map_err(|_| StatusCode::Failure)?;
+            .map_err(io_to_status)?;
         let mut buf = vec![0u8; len as usize];
-        let n = file.read(&mut buf).await.map_err(|_| StatusCode::Failure)?;
+        let n = file.read(&mut buf).await.map_err(io_to_status)?;
         if n == 0 {
             return Err(StatusCode::Eof);
         }
@@ -386,8 +398,8 @@ impl russh_sftp::server::Handler for SftpSession {
         };
         file.seek(std::io::SeekFrom::Start(offset))
             .await
-            .map_err(|_| StatusCode::Failure)?;
-        file.write_all(&data).await.map_err(|_| StatusCode::Failure)?;
+            .map_err(io_to_status)?;
+        file.write_all(&data).await.map_err(io_to_status)?;
         Ok(ok_status(id))
     }
 
@@ -412,7 +424,7 @@ impl russh_sftp::server::Handler for SftpSession {
         let Some(OpenHandle::File(file)) = self.handles.get(&handle) else {
             return Err(StatusCode::Failure);
         };
-        let meta = file.metadata().await.map_err(|_| StatusCode::Failure)?;
+        let meta = file.metadata().await.map_err(io_to_status)?;
         Ok(Attrs {
             id,
             attrs: attrs_from_metadata(&meta),
@@ -439,7 +451,7 @@ impl russh_sftp::server::Handler for SftpSession {
 
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
         self.log_access("opendir", &path);
-        let entries = match self.state.resolve(&path)? {
+        let mut entries = match self.state.resolve(&path)? {
             Resolved::VirtualRoot => {
                 let Root::Multi(list) = &self.state.root else {
                     unreachable!("VirtualRoot only occurs with Root::Multi")
@@ -453,11 +465,11 @@ impl russh_sftp::server::Handler for SftpSession {
                     .collect::<Vec<_>>()
             }
             Resolved::Path(p) => {
-                let meta = std::fs::symlink_metadata(&p).map_err(|_| StatusCode::NoSuchFile)?;
+                let meta = std::fs::symlink_metadata(&p).map_err(io_to_status)?;
                 if !meta.is_dir() {
                     return Err(StatusCode::Failure);
                 }
-                let rd = std::fs::read_dir(&p).map_err(|_| StatusCode::Failure)?;
+                let rd = std::fs::read_dir(&p).map_err(io_to_status)?;
                 rd.filter_map(|e| e.ok())
                     .filter_map(|e| {
                         e.metadata()
@@ -467,6 +479,10 @@ impl russh_sftp::server::Handler for SftpSession {
                     .collect::<Vec<_>>()
             }
         };
+        // Many SFTP clients expect "." and ".." in directory listings.
+        let dot = synthetic_dir_attrs();
+        entries.insert(0, ("..".to_string(), dot.clone()));
+        entries.insert(0, (".".to_string(), dot));
 
         let handle = self.alloc_handle();
         self.handles.insert(
@@ -508,7 +524,7 @@ impl russh_sftp::server::Handler for SftpSession {
         };
         tokio::fs::remove_file(&p)
             .await
-            .map_err(|_| StatusCode::Failure)?;
+            .map_err(io_to_status)?;
         Ok(ok_status(id))
     }
 
@@ -527,7 +543,7 @@ impl russh_sftp::server::Handler for SftpSession {
         };
         tokio::fs::create_dir(&p)
             .await
-            .map_err(|_| StatusCode::Failure)?;
+            .map_err(io_to_status)?;
         Ok(ok_status(id))
     }
 
@@ -541,7 +557,7 @@ impl russh_sftp::server::Handler for SftpSession {
         };
         tokio::fs::remove_dir(&p)
             .await
-            .map_err(|_| StatusCode::Failure)?;
+            .map_err(io_to_status)?;
         Ok(ok_status(id))
     }
 
@@ -596,7 +612,7 @@ impl russh_sftp::server::Handler for SftpSession {
         };
         tokio::fs::rename(&old, &new)
             .await
-            .map_err(|_| StatusCode::Failure)?;
+            .map_err(io_to_status)?;
         Ok(ok_status(id))
     }
 
@@ -835,6 +851,21 @@ fn const_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Single-quote a string for safe embedding in a shell one-liner (`'foo'\''bar'`).
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -936,8 +967,8 @@ async fn main() -> anyhow::Result<()> {
         host = display_ip,
     );
     println!(
-        "  sshpass -p '{pass}' sftp -P {port} {opts} {user}@{host}\n",
-        pass = password,
+        "  sshpass -p {pass} sftp -P {port} {opts} {user}@{host}\n",
+        pass = shell_single_quote(&password),
         port = cli.port,
         opts = host_key_opts,
         user = cli.user,
