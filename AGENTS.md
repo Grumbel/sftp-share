@@ -37,6 +37,7 @@ SFTP runs via `channel.into_stream()` → `russh_sftp::server::run`. That `run` 
 - Do not log passwords at info/debug. The startup banner intentionally prints the password for the operator; that is the exception.
 - Verbose (`-v`) may log virtual paths being accessed; never log file contents.
 - When touching `resolve` or open paths, think about: non-existent create targets, trailing slashes, symlink escape, basename collisions in `Multi` mode.
+- **Always end chat replies that made code or doc changes with a git-style commit message** covering that turn’s work (subject ≤50–72 chars, optional body with bullets). Do this even when the user did not ask for a commit; they can copy-paste it.
 
 ## Common pitfalls
 
