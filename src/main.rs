@@ -230,20 +230,29 @@ struct SftpSession {
     state: Arc<AppState>,
     handles: HashMap<String, OpenHandle>,
     next_handle: u64,
+    verbose: bool,
 }
 
 impl SftpSession {
-    fn new(state: Arc<AppState>) -> Self {
+    fn new(state: Arc<AppState>, verbose: bool) -> Self {
         Self {
             state,
             handles: HashMap::new(),
             next_handle: 0,
+            verbose,
         }
     }
 
     fn alloc_handle(&mut self) -> String {
         self.next_handle += 1;
         format!("h{}", self.next_handle)
+    }
+
+    fn log_access(&self, op: &str, path: &str) {
+        if self.verbose {
+            println!("  {op} {path}");
+            tracing::debug!("{op} {path}");
+        }
     }
 }
 
@@ -277,6 +286,8 @@ impl russh_sftp::server::Handler for SftpSession {
         if wants_write && !self.state.write_enabled {
             return Err(StatusCode::PermissionDenied);
         }
+
+        self.log_access(if wants_write { "open-write" } else { "open" }, &filename);
 
         let path = match self.state.resolve(&filename)? {
             Resolved::Path(p) => p,
@@ -390,6 +401,7 @@ impl russh_sftp::server::Handler for SftpSession {
     }
 
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
+        self.log_access("opendir", &path);
         let entries = match self.state.resolve(&path)? {
             Resolved::VirtualRoot => {
                 let Root::Multi(list) = &self.state.root else {
@@ -453,6 +465,7 @@ impl russh_sftp::server::Handler for SftpSession {
         if !self.state.write_enabled {
             return Err(StatusCode::PermissionDenied);
         }
+        self.log_access("remove", &filename);
         let Resolved::Path(p) = self.state.resolve(&filename)? else {
             return Err(StatusCode::PermissionDenied);
         };
@@ -471,6 +484,7 @@ impl russh_sftp::server::Handler for SftpSession {
         if !self.state.write_enabled {
             return Err(StatusCode::PermissionDenied);
         }
+        self.log_access("mkdir", &path);
         let Resolved::Path(p) = self.state.resolve(&path)? else {
             return Err(StatusCode::PermissionDenied);
         };
@@ -484,6 +498,7 @@ impl russh_sftp::server::Handler for SftpSession {
         if !self.state.write_enabled {
             return Err(StatusCode::PermissionDenied);
         }
+        self.log_access("rmdir", &path);
         let Resolved::Path(p) = self.state.resolve(&path)? else {
             return Err(StatusCode::PermissionDenied);
         };
@@ -510,6 +525,7 @@ impl russh_sftp::server::Handler for SftpSession {
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        self.log_access("stat", &path);
         match self.state.resolve(&path)? {
             Resolved::VirtualRoot => Ok(Attrs {
                 id,
@@ -534,6 +550,7 @@ impl russh_sftp::server::Handler for SftpSession {
         if !self.state.write_enabled {
             return Err(StatusCode::PermissionDenied);
         }
+        self.log_access("rename", &format!("{oldpath} -> {newpath}"));
         let Resolved::Path(old) = self.state.resolve(&oldpath)? else {
             return Err(StatusCode::PermissionDenied);
         };
@@ -578,6 +595,8 @@ struct SshSession {
     channels: HashMap<ChannelId, Channel<Msg>>,
     one_shot: bool,
     shutdown: Arc<tokio::sync::Notify>,
+    peer: Option<SocketAddr>,
+    verbose: bool,
 }
 
 #[async_trait::async_trait]
@@ -601,9 +620,17 @@ impl SshHandler for SshSession {
     }
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+        let peer = self
+            .peer
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
         if user == self.state.user && password == self.state.password {
+            println!("client connected from {peer} as user `{user}`");
+            tracing::info!("client connected from {peer} as user `{user}`");
             Ok(Auth::Accept)
         } else {
+            println!("auth failed from {peer} (user `{user}`)");
+            tracing::warn!("auth failed from {peer} (user `{user}`)");
             Ok(Auth::Reject {
                 proceed_with_methods: None,
             })
@@ -672,9 +699,16 @@ impl SshHandler for SshSession {
         let state = self.state.clone();
         let one_shot = self.one_shot;
         let shutdown = self.shutdown.clone();
+        let peer = self
+            .peer
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let verbose = self.verbose;
         tokio::spawn(async move {
-            let sftp = SftpSession::new(state);
+            let sftp = SftpSession::new(state, verbose);
             russh_sftp::server::run(channel.into_stream(), sftp).await;
+            println!("client disconnected from {peer}");
+            tracing::info!("client disconnected from {peer}");
             if one_shot {
                 shutdown.notify_waiters();
             }
@@ -688,17 +722,24 @@ struct Server {
     state: Arc<AppState>,
     one_shot: bool,
     shutdown: Arc<tokio::sync::Notify>,
+    verbose: bool,
 }
 
 impl SshServerTrait for Server {
     type Handler = SshSession;
 
-    fn new_client(&mut self, _addr: Option<SocketAddr>) -> SshSession {
+    fn new_client(&mut self, addr: Option<SocketAddr>) -> SshSession {
+        if let Some(a) = addr {
+            println!("incoming connection from {a}");
+            tracing::info!("incoming connection from {a}");
+        }
         SshSession {
             state: self.state.clone(),
             channels: HashMap::new(),
             one_shot: self.one_shot,
             shutdown: self.shutdown.clone(),
+            peer: addr,
+            verbose: self.verbose,
         }
     }
 }
@@ -827,6 +868,7 @@ async fn main() -> anyhow::Result<()> {
         state: state.clone(),
         one_shot: cli.one_shot,
         shutdown: shutdown.clone(),
+        verbose: cli.verbose,
     };
 
     let one_shot = cli.one_shot;
