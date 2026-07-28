@@ -255,7 +255,8 @@ enum OpenHandle {
     File(tokio::fs::File),
     Dir {
         entries: Vec<(String, FileAttributes)>,
-        sent: bool,
+        /// Next index to return from `entries` (chunked readdir).
+        offset: usize,
     },
 }
 
@@ -489,21 +490,23 @@ impl russh_sftp::server::Handler for SftpSession {
             handle.clone(),
             OpenHandle::Dir {
                 entries,
-                sent: false,
+                offset: 0,
             },
         );
         Ok(Handle { id, handle })
     }
 
     async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
-        let Some(OpenHandle::Dir { entries, sent }) = self.handles.get_mut(&handle) else {
+        // Cap entries per response so huge directories do not build one giant packet.
+        const BATCH: usize = 100;
+        let Some(OpenHandle::Dir { entries, offset }) = self.handles.get_mut(&handle) else {
             return Err(StatusCode::Failure);
         };
-        if *sent {
+        if *offset >= entries.len() {
             return Err(StatusCode::Eof);
         }
-        *sent = true;
-        let files = entries
+        let end = (*offset + BATCH).min(entries.len());
+        let files = entries[*offset..end]
             .iter()
             .map(|(name, attrs)| File {
                 filename: name.clone(),
@@ -511,6 +514,7 @@ impl russh_sftp::server::Handler for SftpSession {
                 attrs: attrs.clone(),
             })
             .collect();
+        *offset = end;
         Ok(Name { id, files })
     }
 

@@ -20,13 +20,13 @@ Track outstanding work on sftp-share. Check items off as they land.
 - [x] `--one-shot` only after a successful SFTP subsystem session
 - [x] Avoid embedding raw password in printed `sshpass` line when it contains shell-special chars
 - [x] Include `.` / `..` in `readdir` for picky clients
-- [ ] Optional: chunk large `readdir` responses
+- [x] Chunk large `readdir` responses (batches of 100)
 
 ## Build / API verification
 
-- [ ] `cargo build --release` on a modern toolchain (1.78+); this sandbox has Cargo 1.75 and cannot resolve edition2024 crates
-- [ ] Confirm `OpenFlags` variant names (`CREATE`/`TRUNCATE`/`EXCLUDE`) against resolved russh-sftp
-- [ ] Confirm protocol struct field names if the lockfile moves
+- [ ] `cargo build --release` on a modern toolchain (1.78+); this sandbox has Cargo 1.75 and cannot resolve edition2024 crates (e.g. clap 4.6)
+- [x] Confirm `OpenFlags` variant names (`CREATE`/`TRUNCATE`/`EXCLUDE`) — matches russh-sftp 2.x docs
+- [x] Confirm protocol struct fields against docs (`Status`, `Handle`, `Name`, `Data`, `Attrs`, `FileAttributes`, `Version`) — aligned with 2.x; re-check after any lockfile bump + real build
 
 ## Docs
 
